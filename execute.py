@@ -1,12 +1,7 @@
-﻿"""Execution runner - Stage A (PAPER ONLY).
+"""Execution runner - Stage A (PAPER ONLY).
 
-    signal -> trading gate -> position sizing -> PAPER fill
-
-The last wire to eToro is deliberately absent. This module cannot place an
-order: it calls strategies.paper, never etoro.client.open_market_order.
-Going live later means adding one adapter, not rewriting this.
-
-Idempotent: one execution per 15m candle, tracked in journal/executor_state.json.
+signal -> trading gate -> position sizing -> PAPER fill.
+Prints a detailed human-readable execution trace while retaining JSON journaling.
 """
 from __future__ import annotations
 
@@ -37,14 +32,23 @@ JOURNAL = os.path.join(ROOT, "journal")
 STATE_PATH = os.path.join(JOURNAL, "executor_state.json")
 LOG_PATH = os.path.join(JOURNAL, "executor.jsonl")
 MARKET_STATE = os.path.join(JOURNAL, "market_state.json")
-
-# GOLD -> 18 "Gold (Non Expiry)" (openable, lev up to 20x, min $1,000).
-# 559 = GOLD.24-7 is BLOCKED from opening (allowOpenPosition=false).
 SYMBOLS = {"GOLD": 18, "GLD": 3025}
 
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _step(message, level="INFO"):
+    ts = _now().astimezone().strftime("%H:%M:%S")
+    icon = {"OK": "✓", "ERROR": "✗", "WARN": "!", "INFO": "•"}.get(level, "•")
+    print(f"[{ts}] {icon} {message}", flush=True)
+
+
+def _banner(title):
+    print("\n" + "=" * 64, flush=True)
+    print(title, flush=True)
+    print("=" * 64, flush=True)
 
 
 def _load_json(path, default):
@@ -86,156 +90,194 @@ def _live_market():
 
 def fetch_candles(client, instrument_id, interval, count):
     path = f"/market-data/instruments/{instrument_id}/history/candles/desc/{interval}/{count}"
+    _step(f"Fetching {count} {interval} candles for instrument {instrument_id}...")
     payload = client.get(path)
     groups = payload.get("candles") or []
     rows = groups[0].get("candles", []) if groups else []
-    return to_candles(rows)[::-1]
+    candles = to_candles(rows)[::-1]
+    _step(f"Received {len(candles)} {interval} candles", "OK")
+    return candles
+
+
+def _finish(record):
+    _append_log(record)
+    _banner("EXECUTION COMPLETE")
+    _step(f"Result: {record.get('result')}")
+    if record.get("symbol"):
+        _step(f"Symbol: {record.get('symbol')} | Action: {record.get('action')} | Strategy mode: {record.get('mode')}")
+    if record.get("position_id"):
+        _step(f"Position ID: {record['position_id']}")
+    if record.get("live_position_id"):
+        _step(f"Live position ID: {record['live_position_id']}")
+    if record.get("broker_position_id"):
+        _step(f"Broker position ID: {record['broker_position_id']}")
+    if record.get("order_status_id") is not None:
+        _step(f"Order status ID: {record['order_status_id']}")
+    return record
 
 
 def run_once(symbol="GOLD", equity=200.0, risk_pct=0.01, force=False):
     symbol = symbol.upper()
+    _banner(f"eToro Agent Execution - {symbol}")
+    _step(f"Starting | equity=${equity:,.2f} | risk={risk_pct:.2%} | force={force}")
     if symbol not in SYMBOLS:
+        _step(f"Unknown symbol: {symbol}", "ERROR")
         return {"error": f"unknown symbol {symbol}"}
     iid = SYMBOLS[symbol]
+    _step(f"Resolved {symbol} -> instrument ID {iid}", "OK")
 
+    _step("Creating eToro API client...")
     client = build_client()
+    _step("eToro API client ready", "OK")
+
     h1 = fetch_candles(client, iid, "OneHour", 220)
     m15 = fetch_candles(client, iid, "FifteenMinutes", 320)
     if len(m15) < 2 or len(h1) < 2:
+        _step("Not enough candles to evaluate strategy", "ERROR")
         return {"error": "not enough candles"}
-    # Evaluate on the last CLOSED candle so signals cannot repaint.
+
     m15_closed, h1_closed = m15[:-1], h1[:-1]
+    candle = m15_closed[-1].time
+    _step(f"Evaluating last CLOSED 15m candle: {candle}", "OK")
+
     cfg = ScalperConfig()
+    _step("Running GOLD range scalper...")
     report = analyze(h1_closed, m15_closed, cfg)
     signal = report.get("signal", {})
     action = signal.get("action")
-    candle = m15_closed[-1].time
+    _step(f"Strategy mode={report.get('mode')} | signal={action or 'NONE'}")
 
-    state = _load_json(STATE_PATH, {})
     record = {"ts": _now().isoformat(), "symbol": symbol, "candle": candle,
               "mode": report.get("mode"), "action": action}
 
     if action not in ("BUY", "SELL"):
         record["result"] = "no actionable signal"
-        _append_log(record)
-        return record
+        _step("No BUY/SELL signal. Nothing to execute.", "WARN")
+        return _finish(record)
 
+    _step(f"Signal={action}", "OK")
+    _step(f"Entry=${float(signal['entry']):,.2f} | Stop=${float(signal['stop']):,.2f} | TP1=${float(signal.get('tp1') or 0):,.2f} | TP2=${float(signal.get('tp2') or 0):,.2f}")
+
+    state = _load_json(STATE_PATH, {})
     if not force and (state.get(symbol) or {}).get("last_executed_candle") == candle:
         record["result"] = "already executed this candle (idempotent skip)"
-        _append_log(record)
-        return record
+        _step("Idempotency guard blocked duplicate execution for this candle.", "WARN")
+        return _finish(record)
 
-    # Never stack positions: one at a time, regardless of signal frequency.
     holding = paper.open_positions()
+    _step(f"Existing paper positions={len(holding)}")
     if holding and not force:
         record["result"] = "already holding a position - refusing to stack"
         record["open_positions"] = len(holding)
-        _append_log(record)
-        return record
+        _step("Position stacking blocked because a position already exists.", "WARN")
+        return _finish(record)
 
-    # --- trading gate: monitoring stays on, new trades need every condition met
     spread_pct, price_age = _live_market()
+    _step(f"Market spread={spread_pct:.4f}%" if spread_pct is not None else "Market spread unavailable", "OK" if spread_pct is not None else "WARN")
+    _step(f"Market price age={price_age:.1f}s" if price_age is not None else "Market price age unavailable / market disconnected", "OK" if price_age is not None else "WARN")
+
+    _step("Checking kill switch and trading gate...")
     ks = ks_evaluate(ks_load(), KillSwitchConfig(), equity,
                      observed_spread_pct=(spread_pct / 100.0) if spread_pct else None)
-    gate = gate_evaluate(
-        regime_mode=report.get("mode"),
-        killswitch_result=ks,
-        spread_pct=spread_pct,
-        price_age_seconds=price_age,
-        connected=(price_age is not None),
-        cfg=GateConfig(),
-    )
+    gate = gate_evaluate(regime_mode=report.get("mode"), killswitch_result=ks,
+                         spread_pct=spread_pct, price_age_seconds=price_age,
+                         connected=(price_age is not None), cfg=GateConfig())
     record["gate"] = gate
     if not gate["trading_enabled"]:
         record["result"] = "blocked by trading gate"
-        _append_log(record)
-        return record
+        _step("TRADING BLOCKED", "ERROR")
+        for block in gate.get("blocks", []):
+            _step(f"Gate block: {block}", "WARN")
+        return _finish(record)
+    _step("Trading gate passed", "OK")
 
-    # --- sizing + paper fill
     entry = float(signal["entry"])
     stop = float(signal["stop"])
+    _step("Calculating position size...")
     sizing = position_size(entry, stop, RiskConfig(account_equity=equity, risk_per_trade_pct=risk_pct))
     record["sizing"] = sizing
     if "error" in sizing:
         record["result"] = f"sizing failed: {sizing['error']}"
-        _append_log(record)
-        return record
+        _step(f"Position sizing failed: {sizing['error']}", "ERROR")
+        return _finish(record)
+    _step(f"Position notional=${sizing['notional']:,.2f} | margin required=${sizing['margin_required']:,.2f}", "OK")
 
     settings = load_settings()
+    mode = "PAPER" if settings.is_paper else "LIVE"
+    _step(f"Trading mode={mode}")
+
     if settings.is_paper:
-        pos = paper.open_position(
-            symbol, action, sizing["notional"], entry,
-            stop=stop, tp1=signal.get("tp1"), tp2=signal.get("tp2"),
-            leverage=cfg.leverage, spread_pct=spread_pct or 0.0,
-            note="Stage A paper fill", signal_candle=candle,
-        )
+        _step("Opening PAPER position...")
+        pos = paper.open_position(symbol, action, sizing["notional"], entry,
+                                  stop=stop, tp1=signal.get("tp1"), tp2=signal.get("tp2"),
+                                  leverage=cfg.leverage, spread_pct=spread_pct or 0.0,
+                                  note="Stage A paper fill", signal_candle=candle)
         record["position_id"] = pos["id"]
         record["result"] = "PAPER position opened"
+        _step(f"PAPER position opened: {pos['id']}", "OK")
     else:
-        # LIVE PATH. Only reachable when TRADING_MODE=live.
+        _step("LIVE mode: reconciling broker positions before order...", "WARN")
         rec = reconcile.reconcile(client, live_positions.open_positions(), dry_run=False)
         record["reconcile"] = rec
         if not rec.get("ok"):
             record["result"] = "BLOCKED: reconciliation failed - refusing to trade"
-            _append_log(record)
-            return record
-        # eToro requires >= 1.0% stop on this instrument (minStopLossPercentage).
-        # Distances as fractions. Broker floor is 1% (minStopLossPercentage).
+            _step("LIVE TRADE BLOCKED: reconciliation failed", "ERROR")
+            return _finish(record)
+        _step("Broker reconciliation passed", "OK")
+
         stop_frac = max(cfg.stop_buffer_pct, 0.01)
         tp_ref = signal.get("tp2") or signal.get("tp1") or entry
         tp_frac = abs(float(tp_ref) - entry) / entry
         sign = 1.0 if action == "BUY" else -1.0
-        # stopLossRate / takeProfitRate are ABSOLUTE PRICES on this API.
         stop_price = round(entry * (1.0 - sign * stop_frac), 2)
         tp_price = round(entry * (1.0 + sign * tp_frac), 2)
-        # eToro supports buy and sellShort only. A SELL signal is a SHORT.
         tx = "buy" if action == "BUY" else "sellShort"
-        # CRITICAL: eToro's "amount" is the MARGIN committed, NOT the notional.
-        # exposure = amount x leverage. Proven by the first live fill:
-        #   amount 50 -> margin 50, exposure 999.97 at 20x.
-        # Sending the notional here would create 20x the intended position.
-        exposure = max(sizing["notional"], 1000.0)   # broker min exposure
+        exposure = max(sizing["notional"], 1000.0)
         margin_amount = round(exposure / cfg.leverage, 2)
-        payload = live_exec.build_payload(symbol, iid, margin_amount,
-                                          cfg.leverage, stop_price, tp_price,
-                                          transaction=tx)
+        _step(f"LIVE order={tx} | margin=${margin_amount:,.2f} | leverage={cfg.leverage}x | exposure=${exposure:,.2f}")
+        _step(f"Stop=${stop_price:,.2f} | TP=${tp_price:,.2f}")
+        payload = live_exec.build_payload(symbol, iid, margin_amount, cfg.leverage,
+                                           stop_price, tp_price, transaction=tx)
         record["payload"] = payload
+        _step("Submitting LIVE order to eToro...", "WARN")
         resp = live_exec.place(client, payload)
         record["order_response"] = resp
-        final = live_exec.wait_for_terminal(
-            client, order_id=resp.get("orderId"),
-            reference_id=resp.get("referenceId") or client.last_request_id)
+        _step(f"Order submitted | orderId={resp.get('orderId')} | referenceId={resp.get('referenceId')}", "OK")
+        _step("Waiting for terminal order status...")
+        final = live_exec.wait_for_terminal(client, order_id=resp.get("orderId"),
+                                             reference_id=resp.get("referenceId") or client.last_request_id)
         record["order_final"] = final
         status_id = live_exec.extract_status(final)
         record["order_status_id"] = status_id
         pids = live_exec.extract_positions(final)
+        _step(f"Final status={status_id} | positions returned={len(pids)}")
         if status_id in (live_exec.STATUS_FILLED, live_exec.STATUS_PARTIAL) and pids:
-            lp = live_positions.record_open(
-                pids[0], symbol, action, sizing["notional"], entry, stop,
-                tp1=signal.get("tp1"), tp2=signal.get("tp2"),
-                leverage=cfg.leverage, stop_pct=stop_pct,
-                signal_candle=candle)
+            lp = live_positions.record_open(pids[0], symbol, action, sizing["notional"], entry, stop,
+                                            tp1=signal.get("tp1"), tp2=signal.get("tp2"),
+                                            leverage=cfg.leverage, stop_pct=stop_frac,
+                                            signal_candle=candle)
             record["live_position_id"] = lp["id"]
             record["broker_position_id"] = pids[0]
             record["result"] = "LIVE position OPENED"
+            _step(f"LIVE position OPENED: broker position {pids[0]}", "OK")
         else:
             record["result"] = f"LIVE order not filled (status {status_id})"
+            _step(f"LIVE order not filled | status={status_id}", "WARN")
         record["position_id"] = None
 
     state[symbol] = {"last_executed_candle": candle, "at": _now().isoformat(),
-                     "position_id": pos["id"]}
+                     "position_id": record.get("position_id") or record.get("live_position_id")}
     _save_json(STATE_PATH, state)
+    _step("Execution state saved to journal/executor_state.json", "OK")
     _append_log(record)
+    _step("Execution record saved to journal/executor.jsonl", "OK")
 
-    notify(
-        f"🟢 PAPER TRADE OPENED\n\n{symbol} {action}\n"
-        f"Position: ${sizing['notional']:,.2f} (margin ${sizing['margin_required']:,.2f} at {cfg.leverage}×)\n"
-        f"Entry: ${entry:,.2f}\nStop: ${stop:,.2f}\n"
-        f"TP1: ${float(signal.get('tp1') or 0):,.2f} / TP2: ${float(signal.get('tp2') or 0):,.2f}\n"
-        f"Mode: PAPER (no real order)",
-        kind="paper_open",
-    )
-    return record
+    notify(f"🟢 {mode} TRADE OPENED\n\n{symbol} {action}\n"
+           f"Position: ${sizing['notional']:,.2f} (margin ${sizing['margin_required']:,.2f} at {cfg.leverage}×)\n"
+           f"Entry: ${entry:,.2f}\nStop: ${stop:,.2f}\n"
+           f"TP1: ${float(signal.get('tp1') or 0):,.2f} / TP2: ${float(signal.get('tp2') or 0):,.2f}\n"
+           f"Mode: {mode}", kind="paper_open" if settings.is_paper else "live_open")
+    return _finish(record)
 
 
 def _append_log(record):
@@ -245,30 +287,23 @@ def _append_log(record):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="execute.py", description="Stage A paper execution runner")
+    p = argparse.ArgumentParser(prog="execute.py", description="Stage A execution runner")
     p.add_argument("--symbol", default="GOLD")
     p.add_argument("--equity", type=float, default=200.0)
     p.add_argument("--risk-pct", type=float, default=0.01)
     p.add_argument("--force", action="store_true", help="ignore the idempotency guard")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
-
     try:
         rec = run_once(args.symbol, args.equity, args.risk_pct, args.force)
     except EtoroError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        _step(f"eToro API error: {exc}", "ERROR")
         return 1
-
+    except Exception as exc:
+        _step(f"Unexpected error: {type(exc).__name__}: {exc}", "ERROR")
+        return 1
     if args.json:
         print(json.dumps(rec, indent=2, default=str))
-    else:
-        print(f"execute: {rec.get('result')}")
-        print(f"  mode  : {rec.get('mode')}   action: {rec.get('action')}   candle: {rec.get('candle')}")
-        if rec.get("gate") and not rec["gate"]["trading_enabled"]:
-            for b in rec["gate"]["blocks"]:
-                print(f"  blocked: {b}")
-        if rec.get("position_id"):
-            print(f"  paper position: {rec['position_id']}")
     return 0
 
 
