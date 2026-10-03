@@ -1,0 +1,28 @@
+﻿# Secrets - never commit these
+.env
+env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Local state / logs
+logs/
+*.log
+state/
+*.bak*
+journal/
+env.bak-*
+.env
+*.env
+*.bak*
+journal/
+env.bak-*
+.env
+*.env
