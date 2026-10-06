@@ -335,7 +335,6 @@ class EtoroClient:
         payload: Dict[str, Any] = {
             "action": "open",
             "transaction": transaction,
-            "symbol": symbol,
             "instrumentId": int(instrument_id),
             "orderType": "mkt",
             "leverage": int(leverage),
@@ -347,7 +346,8 @@ class EtoroClient:
         if take_profit is not None:
             payload["takeProfitRate"] = float(take_profit)
         self.log.info("Opening %s %s for %s USD", transaction, symbol, amount_usd)
-        return self.post("/api/v2/trading/execution/orders", json=payload)
+        from strategies import live_exec
+        return live_exec.place(self, payload, self.settings)
 
     def close_position(
         self,
@@ -363,9 +363,9 @@ class EtoroClient:
             raise EtoroError("instrument_id is required to close a position.")
         payload = {"InstrumentId": int(instrument_id), "UnitsToDeduct": units_to_deduct}
         self.log.info("Closing position %s (instrument %s)", position_id, instrument_id)
-        return self.post(
-            f"/api/v1/trading/execution/market-close-orders/positions/{int(position_id)}",
-            json=payload,
+        from strategies import live_exec
+        return live_exec.close(
+            self, position_id, int(instrument_id), units_to_deduct, self.settings
         )
 
 
