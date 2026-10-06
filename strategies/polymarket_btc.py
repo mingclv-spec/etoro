@@ -19,7 +19,8 @@ import requests
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 CLOB_URL = "https://clob.polymarket.com"
-DEFAULT_TIMEOUT = 10.0
+DEFAULT_TIMEOUT = 6.0
+DEFAULT_RETRIES = 1
 
 
 class PolymarketError(RuntimeError):
@@ -124,16 +125,20 @@ def _market_volume(market: dict[str, Any]) -> float:
 def _fetch_history(token_id: Optional[str], timeout: float) -> Optional[float]:
     if not token_id:
         return None
-    try:
-        response = requests.get(
-            f"{CLOB_URL}/prices-history",
-            params={"market": token_id, "interval": "1h", "fidelity": 5},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError):
-        return None
+    for attempt in range(DEFAULT_RETRIES + 1):
+        try:
+            response = requests.get(
+                f"{CLOB_URL}/prices-history",
+                params={"market": token_id, "interval": "1h", "fidelity": 5},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except (requests.RequestException, ValueError):
+            if attempt == DEFAULT_RETRIES:
+                return None
+            time.sleep(0.25)
 
     history = payload.get("history") if isinstance(payload, dict) else payload
     if not isinstance(history, list) or len(history) < 2:
@@ -167,16 +172,27 @@ def fetch_btc_signal(
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Return the best active BTC short-duration Up/Down market signal."""
-    try:
-        response = requests.get(
-            GAMMA_URL,
-            params={"active": "true", "closed": "false", "limit": 100},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise PolymarketError(f"unable to read Polymarket markets: {exc}") from exc
+    last_error: Optional[Exception] = None
+    payload: Any = None
+    for attempt in range(DEFAULT_RETRIES + 1):
+        try:
+            response = requests.get(
+                GAMMA_URL,
+                params={"active": "true", "closed": "false", "limit": 100},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            last_error = None
+            break
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            if attempt < DEFAULT_RETRIES:
+                time.sleep(0.35)
+    if last_error is not None:
+        raise PolymarketError(
+            f"unable to read Polymarket markets after retry: {last_error}"
+        ) from last_error
 
     markets = payload if isinstance(payload, list) else payload.get("markets", [])
     candidates: list[tuple[float, dict[str, Any]]] = []
