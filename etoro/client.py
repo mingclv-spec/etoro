@@ -328,10 +328,15 @@ class EtoroClient:
     @staticmethod
     def extract_candles(payload: Any) -> list[dict]:
         """Unwrap eToro's nested candle response into individual candle rows."""
-        if isinstance(payload, Mapping) and isinstance(payload.get("data"), Mapping):
-            payload = payload["data"]
+        # Accept both {data: {candles: [...]}} and {data: [...]} forms.
+        if isinstance(payload, Mapping) and "data" in payload:
+            data = payload.get("data")
+            if isinstance(data, (Mapping, list)):
+                payload = data
         if isinstance(payload, Mapping):
             groups = payload.get("candles")
+            if groups is None:
+                groups = payload.get("items")
         else:
             groups = payload
         if not isinstance(groups, list):
@@ -340,6 +345,8 @@ class EtoroClient:
         for group in groups:
             if isinstance(group, Mapping) and isinstance(group.get("candles"), list):
                 rows.extend(x for x in group["candles"] if isinstance(x, Mapping))
+            elif isinstance(group, Mapping) and isinstance(group.get("items"), list):
+                rows.extend(x for x in group["items"] if isinstance(x, Mapping))
             elif isinstance(group, Mapping) and "close" in group:
                 rows.append(dict(group))
         return rows
