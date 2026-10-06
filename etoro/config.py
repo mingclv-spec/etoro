@@ -39,7 +39,7 @@ DEFAULTS: Mapping[str, str] = {
     "ETORO_DRY_RUN": "true",
     "ETORO_ACCOUNT": "demo",
     "ETORO_TRADING_MODE": "paper",
-    "ETORO_MAX_ORDER_USD": "100",
+    "ETORO_MAX_ORDER_USD": "500",
     "ETORO_MAX_POSITION_USD": "500",
     "ETORO_MAX_DAILY_LOSS_USD": "50",
     "ETORO_ALLOWED_SYMBOLS": "",
