@@ -145,6 +145,7 @@ class Settings:
 
     api_key: str = ""
     user_key: str = ""
+    user_key_source: str = ""
     dry_run: bool = True
     account: str = "demo"
     trading_mode: str = "paper"
@@ -185,6 +186,7 @@ class Settings:
         return {
             "api_key": f"<set: {len(self.api_key)} chars>" if self.api_key else "<missing>",
             "user_key": f"<set: {len(self.user_key)} chars>" if self.user_key else "<missing>",
+            "user_key_source": self.user_key_source or "<unknown>",
             "dry_run": self.dry_run,
             "account": self.account,
             "trading_mode": self.trading_mode,
@@ -214,12 +216,11 @@ def load_settings(
     # user key that matches the selected account, otherwise a demo run would
     # authenticate as the real account (or vice versa) and get 403s.
     _account = (values.get("ETORO_ACCOUNT", "demo") or "demo").strip()
-    _is_demo = _account.lower() != "real"
-    _user_key = values.get("ETORO_USER_KEY", "").strip()
-    if _is_demo:
-        _demo_key = values.get("ETORO_USER_KEY_demo", "").strip()
-        if _demo_key:
-            _user_key = _demo_key
+    _account = _account.lower()
+    if _account not in {"demo", "real"}:
+        raise ConfigError("ETORO_ACCOUNT must be exactly 'demo' or 'real'")
+    _user_key_source = "ETORO_USER_KEY_demo" if _account == "demo" else "ETORO_USER_KEY"
+    _user_key = values.get(_user_key_source, "").strip()
 
     settings = Settings(
         api_key=values.get("ETORO_API_KEY", "").strip(),
@@ -235,8 +236,11 @@ def load_settings(
     )
 
     if require_keys:
-        missing = [name for name, value in (("ETORO_API_KEY", settings.api_key),
-                                            ("ETORO_USER_KEY", settings.user_key)) if not value]
+        missing = []
+        if not settings.api_key:
+            missing.append("ETORO_API_KEY")
+        if not settings.user_key:
+            missing.append(settings.user_key_source)
         if missing:
             where = settings.env_source or "the process environment"
             raise ConfigError(
