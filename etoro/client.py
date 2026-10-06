@@ -332,21 +332,17 @@ class EtoroClient:
         symbol = symbol.strip().upper()
         self._assert_trading_allowed(float(amount_usd), symbol, force)
         instrument_id = instrument_id or self.resolve_instrument_id(symbol)
-        payload: Dict[str, Any] = {
-            "action": "open",
-            "transaction": transaction,
-            "instrumentId": int(instrument_id),
-            "orderType": "mkt",
-            "leverage": int(leverage),
-            "amount": float(amount_usd),
-            "orderCurrency": "usd",
-        }
-        if stop_loss is not None:
-            payload["stopLossRate"] = float(stop_loss)
-        if take_profit is not None:
-            payload["takeProfitRate"] = float(take_profit)
         self.log.info("Opening %s %s for %s USD", transaction, symbol, amount_usd)
         from strategies import live_exec
+        payload = live_exec.build_payload(
+            symbol,
+            int(instrument_id),
+            float(amount_usd),
+            int(leverage),
+            stop_loss,
+            take_profit,
+            transaction=transaction,
+        )
         return live_exec.place(self, payload, self.settings)
 
     def close_position(
