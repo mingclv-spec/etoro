@@ -37,7 +37,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"  account  : {settings.account} ({'demo' if settings.is_demo else 'REAL'})")
     print(f"  dry-run  : {settings.dry_run}")
     print(f"  live     : {'ENABLED' if settings.live_trading_enabled else 'disabled'}")
-    print(f"  symbols  : {', '.join(settings.allowed_symbols) or '<any>'}")
+    print("  instruments: dynamic (eToro market-data catalog)")
     print(f"  limits   : order<={settings.max_order_usd} / position<={settings.max_position_usd} USD")
     client = build_client(settings=settings)
     result = client.ping()
