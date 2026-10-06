@@ -277,20 +277,38 @@ class EtoroClient:
         return self.get("/watchlists", params=params)
 
     def search_instruments(self, symbol: str) -> Any:
-        """Search instruments by exact internal symbol, e.g. ``BTC`` or ``AAPL``."""
-        return self.get("/market-data/search", params={"internalSymbolFull": symbol})
+        """Search eToro's live instrument catalog by symbol/name.
+
+        No local instrument whitelist is used. The eToro market-data catalog is
+        the source of truth, so newly supported stocks, ETFs, crypto, and
+        commodities can be selected without a code change.
+        """
+        wanted = str(symbol).strip()
+        payload = self.get("/market-data/search", params={"internalSymbolFull": wanted})
+        items = payload.get("items") if isinstance(payload, Mapping) else payload
+        if items:
+            return payload
+        return self.get("/market-data/search", params={"search": wanted})
 
     def resolve_instrument_id(self, symbol: str) -> int:
+        """Resolve a symbol dynamically from eToro's current instrument catalog."""
         payload = self.search_instruments(symbol)
         items = payload.get("items") if isinstance(payload, Mapping) else payload
         if not items:
-            raise EtoroError(f"No instrument found for symbol {symbol!r}")
+            raise EtoroError(f"No eToro-supported instrument found for {symbol!r}")
+
         wanted = symbol.strip().upper()
         for item in items:
-            if str(item.get("internalSymbolFull", "")).upper() == wanted:
-                return int(item["instrumentId"])
-        first = items[0]
-        return int(first["instrumentId"])
+            for key in ("internalSymbolFull", "symbol", "symbolName", "ticker"):
+                if str(item.get(key, "")).strip().upper() == wanted:
+                    return int(item["instrumentId"])
+
+        if len(items) == 1:
+            return int(items[0]["instrumentId"])
+
+        raise EtoroError(
+            f"Multiple instruments matched {symbol!r}; use an exact eToro symbol."
+        )
 
     # ---------------------------------------------------------------- trading
     def _assert_trading_allowed(self, amount_usd: Optional[float], symbol: Optional[str],
@@ -306,10 +324,9 @@ class EtoroClient:
                 "Dry-run is ON (ETORO_DRY_RUN=true). No order was sent. "
                 "Set ETORO_DRY_RUN=false (and ETORO_ACCOUNT=real) when you truly mean it."
             )
-        if symbol is not None and not self.settings.symbol_allowed(symbol):
-            raise EtoroRiskLimitExceeded(
-                f"{symbol} is not in ETORO_ALLOWED_SYMBOLS={self.settings.allowed_symbols}"
-            )
+        # Instrument selection is dynamic: eToro's live market-data catalog is
+        # the source of truth. Risk limits below remain active regardless of
+        # which supported instrument is selected.
         if amount_usd is not None and amount_usd > self.settings.max_order_usd:
             raise EtoroRiskLimitExceeded(
                 f"Order of {amount_usd} USD exceeds ETORO_MAX_ORDER_USD="
