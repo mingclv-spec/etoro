@@ -15,8 +15,6 @@ import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import quote
-
 import requests
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -212,6 +210,7 @@ def fetch_btc_signal(
 
     candidates.sort(key=lambda item: item[0])
     market = candidates[0][1]
+    end = _parse_dt(market.get("endDate") or market.get("endDateIso"))
     outcomes = _outcome_map(market)
     tokens = _token_map(market)
 
