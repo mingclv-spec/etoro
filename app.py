@@ -24,6 +24,42 @@ def _parse_params(pairs: Optional[List[str]]) -> Dict[str, str]:
 def _dump(payload: Any) -> None:
     print(json.dumps(payload, indent=2, default=str))
 
+def _table(payload: Any) -> None:
+    """Render structured output as a compact table; JSON remains opt-in."""
+    if isinstance(payload, dict):
+        rows = []
+        for key, value in payload.items():
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, default=str)
+            rows.append({"field": key, "value": value})
+        if not rows:
+            print("(no data)")
+            return
+        columns = ["field", "value"]
+    elif isinstance(payload, list):
+        rows = []
+        for item in payload:
+            if isinstance(item, dict):
+                rows.append(item)
+            else:
+                rows.append({"value": item})
+        if not rows:
+            print("(no data)")
+            return
+        columns = list(rows[0].keys())
+    else:
+        rows = [{"value": payload}]
+        columns = ["value"]
+
+    widths = {
+        col: max(len(col), *(len(str(row.get(col, ""))) for row in rows))
+        for col in columns
+    }
+    print(" | ".join(col.ljust(widths[col]) for col in columns))
+    print("-+-".join("-" * widths[col] for col in columns))
+    for row in rows:
+        print(" | ".join(str(row.get(col, "")).ljust(widths[col]) for col in columns))
+
 
 def cmd_settings(args: argparse.Namespace) -> int:
     _dump(load_settings().describe())
@@ -138,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("get", help="raw GET against any API path")
     p.add_argument("path", help="e.g. /watchlists or /api/v1/market-data/search")
     p.add_argument("--param", action="append", help="query parameter key=value (repeatable)")
+    p.add_argument("--json", action="store_true", help="also dump the raw JSON payload")
     p.set_defaults(func=cmd_get)
 
     p = sub.add_parser("order", help="open a market order (gated by dry-run + limits)")
@@ -148,6 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stop-loss", type=float)
     p.add_argument("--take-profit", type=float)
     p.add_argument("--yes", action="store_true", help="confirm you really mean it")
+    p.add_argument("--json", action="store_true", help="also dump the raw JSON response")
     p.set_defaults(func=cmd_order)
 
     p = sub.add_parser("close", help="close a position (gated by dry-run)")
@@ -155,6 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--instrument-id", type=int, required=True)
     p.add_argument("--units", type=float, help="omit for a full close")
     p.add_argument("--yes", action="store_true")
+    p.add_argument("--json", action="store_true", help="also dump the raw JSON response")
     p.set_defaults(func=cmd_close)
 
     return parser
