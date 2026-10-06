@@ -79,16 +79,89 @@ def format_result(symbol, output, analysis):
 def maybe_order(symbol, analysis, st):
     if not analysis:
         return None
-    action = analysis.get("action")
+    action = analysis.get("action") or (analysis.get("signal") or {}).get("action")
     if action not in {"BUY", "SELL"}:
         return None
     key = symbol.upper()
-    if st["open_strategies"].get(key):
-        return symbol + ": " + action + " detected, but existing strategy position state blocks another entry."
     live_enabled = os.getenv("ETORO_AUTONOMOUS_LIVE", "false").strip().lower() in {"1","true","yes","on"}
     if not live_enabled:
         return symbol + ": " + action + " detected; autonomous live execution is OFF."
-    amount, leverage = (20, 1) if symbol == "BTC" else (50, 20)
+    from etoro.config import load_settings
+    from etoro import build_client
+    settings = load_settings()
+    if settings.account.strip().lower() != "real":
+        return symbol + ": LIVE BLOCKED — Real account required."
+
+    # Reconcile local state with the actual eToro portfolio before every entry.
+    client = build_client(settings=settings)
+    try:
+        portfolio = client.get("/trading/info/portfolio")
+    except Exception as exc:
+        return symbol + ": LIVE BLOCKED — portfolio check failed: " + str(exc)
+    positions = []
+    if isinstance(portfolio, dict):
+        cp = portfolio.get("clientPortfolio", portfolio)
+        if isinstance(cp, dict) and isinstance(cp.get("positions"), list):
+            positions = [p for p in cp["positions"] if isinstance(p, dict)]
+    try:
+        instrument_id = client.resolve_instrument_id(symbol)
+    except Exception as exc:
+        return symbol + ": LIVE BLOCKED — instrument check failed: " + str(exc)
+    for position in positions:
+        try:
+            pid = int(position.get("instrumentId", position.get("instrumentID")))
+        except (TypeError, ValueError):
+            pid = None
+        if pid == instrument_id:
+            st["open_strategies"][key] = {"reconciled": True, "status": "already_open"}
+            save_state(st)
+            return symbol + ": LIVE BLOCKED — existing eToro position already open."
+    st["open_strategies"].pop(key, None)
+
+    # Fail closed if an existing position has no recognizable cash exposure.
+    exposure = 0.0
+    for position in positions:
+        found = None
+        for field in ("investedAmount", "investedAmountUsd", "positionValue", "positionValueUsd", "exposure", "exposureUsd", "amount"):
+            try:
+                if position.get(field) is not None:
+                    found = abs(float(position[field])); break
+            except (TypeError, ValueError):
+                pass
+        if found is None:
+            return symbol + ": LIVE BLOCKED — existing position exposure is unknown."
+        exposure += found
+
+    limits = (20.0, 1) if symbol == "BTC" else (50.0, 20)
+    amount, leverage = limits
+    if amount > settings.max_order_usd:
+        return symbol + ": LIVE BLOCKED — order exceeds ETORO_MAX_ORDER_USD."
+    if exposure + amount > settings.max_position_usd:
+        return symbol + ": LIVE BLOCKED — max position exposure would be exceeded."
+
+    # Require a recognized daily P/L field; never infer daily loss from equity.
+    try:
+        pnl = client.get("/trading/info/real/pnl")
+    except Exception as exc:
+        return symbol + ": LIVE BLOCKED — daily P/L check failed: " + str(exc)
+    daily = None
+    def walk(value):
+        nonlocal daily
+        if isinstance(value, dict):
+            for k, v in value.items():
+                nk = str(k).replace("_", "").replace("-", "").lower()
+                if nk in {"dailypnl", "dailypnlusd", "todaypnl", "todaypnlusd"}:
+                    try: daily = float(v)
+                    except (TypeError, ValueError): pass
+                walk(v)
+        elif isinstance(value, list):
+            for v in value: walk(v)
+    walk(pnl)
+    if daily is None:
+        return symbol + ": LIVE BLOCKED — daily P/L field not recognized."
+    if daily <= -abs(settings.max_daily_loss_usd):
+        return symbol + ": LIVE BLOCKED — daily loss limit reached."
+
     stop = analysis.get("stop") or (analysis.get("signal") or {}).get("stop")
     if stop is None:
         return symbol + ": " + action + " blocked — no calculated stop-loss."
