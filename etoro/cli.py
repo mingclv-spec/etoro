@@ -30,6 +30,15 @@ def main(argv=None) -> int:
         os.environ["ETORO_ACCOUNT"] = account
         del args[i:i + 2]
 
+    # Real-account execution requires an explicit --live flag. The flag is
+    # intentionally left in argv so the order subcommand can verify it.
+    if "--live" in args:
+        account = os.environ.get("ETORO_ACCOUNT", "demo").strip().lower()
+        if account != "real":
+            raise SystemExit("--live is only allowed with --account real")
+        os.environ["ETORO_TRADING_MODE"] = "live"
+        os.environ["ETORO_DRY_RUN"] = "false"
+
     return app_main(args)
 
 
