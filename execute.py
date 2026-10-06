@@ -18,7 +18,7 @@ except Exception:
     pass
 
 from etoro import EtoroError, build_client
-from etoro.config import load_settings
+from etoro.config import ConfigError, load_settings
 from strategies import paper, live_exec, reconcile, live_positions
 from strategies.gold_range_scalper import ScalperConfig, analyze
 from strategies.indicators import to_candles
@@ -99,6 +99,20 @@ def fetch_candles(client, instrument_id, interval, count):
     return candles
 
 
+def _print_config(settings):
+    _banner("eToro Agent Configuration")
+    _step(f"Account: {settings.account.upper()}")
+    _step(f"User key source: {settings.user_key_source}")
+    _step(f"API key: {'SET (' + str(len(settings.api_key)) + ' chars)' if settings.api_key else 'MISSING'}",
+          "OK" if settings.api_key else "ERROR")
+    _step(f"User key: {'SET (' + str(len(settings.user_key)) + ' chars)' if settings.user_key else 'MISSING'}",
+          "OK" if settings.user_key else "ERROR")
+    _step(f"Trading mode: {settings.trading_mode.upper()}")
+    _step(f"Dry run: {str(settings.dry_run).upper()}")
+    _step(f"Live trading enabled: {str(settings.live_trading_enabled).upper()}",
+          "WARN" if settings.live_trading_enabled else "OK")
+
+
 def _finish(record):
     _append_log(record)
     _banner("EXECUTION COMPLETE")
@@ -118,7 +132,9 @@ def _finish(record):
 
 def run_once(symbol="GOLD", equity=200.0, risk_pct=0.01, force=False):
     symbol = symbol.upper()
+    settings = load_settings()
     _banner(f"eToro Agent Execution - {symbol}")
+    _print_config(settings)
     _step(f"Starting | equity=${equity:,.2f} | risk={risk_pct:.2%} | force={force}")
     if symbol not in SYMBOLS:
         _step(f"Unknown symbol: {symbol}", "ERROR")
@@ -202,7 +218,6 @@ def run_once(symbol="GOLD", equity=200.0, risk_pct=0.01, force=False):
         return _finish(record)
     _step(f"Position notional=${sizing['notional']:,.2f} | margin required=${sizing['margin_required']:,.2f}", "OK")
 
-    settings = load_settings()
     mode = "PAPER" if settings.is_paper else "LIVE"
     _step(f"Trading mode={mode}")
 
@@ -286,17 +301,32 @@ def _append_log(record):
         fh.write(json.dumps(record, default=str) + "\n")
 
 
+def _check_config():
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        _step(f"Configuration error: {exc}", "ERROR")
+        return 1
+    _print_config(settings)
+    _step("Configuration check PASSED.", "OK")
+    return 0
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="execute.py", description="Stage A execution runner")
+    p = argparse.ArgumentParser(prog="execute.py", description="eToro execution runner")
     p.add_argument("--symbol", default="GOLD")
     p.add_argument("--equity", type=float, default=200.0)
     p.add_argument("--risk-pct", type=float, default=0.01)
     p.add_argument("--force", action="store_true", help="ignore the idempotency guard")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--check-config", action="store_true",
+                   help="validate account and credential selection without trading")
     args = p.parse_args(argv)
     try:
+        if args.check_config:
+            return _check_config()
         rec = run_once(args.symbol, args.equity, args.risk_pct, args.force)
-    except EtoroError as exc:
+    except (EtoroError, ConfigError) as exc:
         _step(f"eToro API error: {exc}", "ERROR")
         return 1
     except Exception as exc:
