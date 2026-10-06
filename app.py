@@ -187,12 +187,10 @@ def cmd_signal(args: argparse.Namespace) -> int:
     if strategy_name(symbol) == "BTC_TREND_RIDER":
         raw_4h = client.get_candles(instrument_id, "FourHours", 220, direction="asc")
         raw_1h = client.get_candles(instrument_id, "OneHour", 120, direction="asc")
-        candles_4h = to_candles(client.extract_candles(raw_4h))
-        candles_1h = to_candles(client.extract_candles(raw_1h))
-        if len(candles_4h) < 200:
-            raise EtoroError(f"Not enough 4H candles returned for BTC: {len(candles_4h)}")
-        if len(candles_1h) < 60:
-            raise EtoroError(f"Not enough 1H candles returned for BTC: {len(candles_1h)}")
+        rows_4h = client.extract_candles(raw_4h)
+        rows_1h = client.extract_candles(raw_1h)
+        candles_4h = to_candles(rows_4h)
+        candles_1h = to_candles(rows_1h)
 
         try:
             pm = fetch_btc_signal(PolymarketConfig())
@@ -220,6 +218,8 @@ def cmd_signal(args: argparse.Namespace) -> int:
             "analysis_candle_price": _fmt_price(analysis.get("price")),
             "strategy": analysis.get("strategy"),
             "technical_score": f"{analysis.get('technical_score', 0)}/6",
+            "candles_4h": len(candles_4h),
+            "candles_1h": len(candles_1h),
         })
 
         print("\nTECHNICAL CONDITIONS")
