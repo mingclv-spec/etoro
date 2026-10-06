@@ -85,6 +85,16 @@ def cmd_order(args: argparse.Namespace) -> int:
     client = build_client()
     if not args.yes:
         raise SystemExit("Refusing to place an order without --yes (explicit confirmation).")
+
+    if args.leverage > 1 and args.stop_loss is None:
+        raise SystemExit("--stop-loss is required when --leverage is greater than 1.")
+
+    if args.stop_loss is not None and args.stop_loss <= 0:
+        raise SystemExit("--stop-loss must be greater than 0 (an absolute stop-loss price).")
+
+    if args.take_profit is not None and args.take_profit <= 0:
+        raise SystemExit("--take-profit must be greater than 0 (an absolute take-profit price).")
+
     _dump(client.open_market_order(
         args.symbol,
         args.amount,
