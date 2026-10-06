@@ -42,7 +42,6 @@ DEFAULTS: Mapping[str, str] = {
     "ETORO_MAX_ORDER_USD": "500",
     "ETORO_MAX_POSITION_USD": "500",
     "ETORO_MAX_DAILY_LOSS_USD": "50",
-    "ETORO_ALLOWED_SYMBOLS": "",
 }
 
 
@@ -152,7 +151,6 @@ class Settings:
     max_order_usd: float = 100.0
     max_position_usd: float = 500.0
     max_daily_loss_usd: float = 50.0
-    allowed_symbols: List[str] = field(default_factory=list)
     api_host: str = API_HOST
     base_url: str = API_V1
     env_source: Optional[str] = None
@@ -170,11 +168,6 @@ class Settings:
     def live_trading_enabled(self) -> bool:
         """True only when the operator deliberately turned demo and dry-run off."""
         return (not self.dry_run) and (not self.is_demo)
-
-    def symbol_allowed(self, symbol: str) -> bool:
-        if not self.allowed_symbols:
-            return True
-        return str(symbol).strip().upper() in self.allowed_symbols
 
     def __repr__(self) -> str:  # pragma: no cover - formatting helper
         return f"<Settings {self.describe()}>"
@@ -195,7 +188,7 @@ class Settings:
             "max_order_usd": self.max_order_usd,
             "max_position_usd": self.max_position_usd,
             "max_daily_loss_usd": self.max_daily_loss_usd,
-            "allowed_symbols": list(self.allowed_symbols) or "<any>",
+            "instrument_selection": "dynamic (eToro market-data catalog)",
             "base_url": self.base_url,
             "env_source": self.env_source or "<environment only>",
         }
@@ -231,7 +224,6 @@ def load_settings(
         max_order_usd=_as_float(values.get("ETORO_MAX_ORDER_USD", "100"), "ETORO_MAX_ORDER_USD"),
         max_position_usd=_as_float(values.get("ETORO_MAX_POSITION_USD", "500"), "ETORO_MAX_POSITION_USD"),
         max_daily_loss_usd=_as_float(values.get("ETORO_MAX_DAILY_LOSS_USD", "50"), "ETORO_MAX_DAILY_LOSS_USD"),
-        allowed_symbols=_as_list(values.get("ETORO_ALLOWED_SYMBOLS", "")),
         env_source=str(path) if path is not None else None,
     )
 
