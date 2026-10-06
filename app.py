@@ -123,7 +123,14 @@ def cmd_get(args: argparse.Namespace) -> int:
 
 
 def cmd_order(args: argparse.Namespace) -> int:
-    client = build_client()
+    settings = load_settings()
+    if settings.account.strip().lower() == "real" and not args.live:
+        raise SystemExit(
+            "Real-account orders require explicit --live in addition to --yes."
+        )
+    if args.live and settings.account.strip().lower() != "real":
+        raise SystemExit("--live is only allowed with --account real.")
+    client = build_client(settings=settings)
     if not args.yes:
         raise SystemExit("Refusing to place an order without --yes (explicit confirmation).")
 
@@ -416,6 +423,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stop-loss", type=float)
     p.add_argument("--take-profit", type=float)
     p.add_argument("--yes", action="store_true", help="confirm you really mean it")
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="explicitly enable a Real-account order; requires --account real",
+    )
     p.add_argument("--json", action="store_true", help="also dump the raw JSON response")
     p.set_defaults(func=cmd_order)
 
