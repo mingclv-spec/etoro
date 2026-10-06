@@ -9,8 +9,10 @@ from typing import Any, Dict, List, Optional
 
 from etoro import EtoroDryRunBlocked, EtoroError, __version__, build_client
 from etoro.config import ConfigError, load_settings
+from strategies.bitcoin_trend_rider import BTCConfig, signal as analyze_btc
 from strategies.gold_range_scalper import ScalperConfig, analyze as analyze_gold
 from strategies.indicators import to_candles
+from strategies.polymarket_btc import PolymarketConfig, PolymarketError, fetch_btc_signal
 from strategies.strategy_router import strategy_name
 
 
@@ -176,16 +178,117 @@ def _condition_rows(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
 def cmd_signal(args: argparse.Namespace) -> int:
     """Read live eToro candles and print a signal; never places an order."""
     symbol = args.symbol.strip().upper()
-    if strategy_name(symbol) != "GOLD_RANGE_SCALPER":
-        raise SystemExit(
-            f"signal is currently implemented for GOLD only; {symbol} is not an active signal strategy."
-        )
 
     client = build_client()
     instrument_id = client.resolve_instrument_id(symbol)
-
     rate_payload = client.get_rates(instrument_id)
     live_price = client.extract_rate(rate_payload, instrument_id)
+
+    if strategy_name(symbol) == "BTC_TREND_RIDER":
+        raw_4h = client.get_candles(instrument_id, "FourHours", 220, direction="asc")
+        raw_1h = client.get_candles(instrument_id, "OneHour", 120, direction="asc")
+        candles_4h = to_candles(client.extract_candles(raw_4h))
+        candles_1h = to_candles(client.extract_candles(raw_1h))
+        if len(candles_4h) < 200:
+            raise EtoroError(f"Not enough 4H candles returned for BTC: {len(candles_4h)}")
+        if len(candles_1h) < 60:
+            raise EtoroError(f"Not enough 1H candles returned for BTC: {len(candles_1h)}")
+
+        try:
+            pm = fetch_btc_signal(PolymarketConfig())
+        except PolymarketError as exc:
+            pm = {
+                "available": False,
+                "source": "polymarket",
+                "reason": str(exc),
+            }
+
+        cfg = BTCConfig(
+            max_leverage=1,
+            trade_amount_usd=20.0,
+            max_loss_usd=10.0,
+        )
+        analysis = analyze_btc(candles_4h, candles_1h, [], cfg, pm)
+        action = analysis.get("action", "STAND_ASIDE")
+
+        print("BTC TRADING SIGNAL")
+        print("=" * 64)
+        _table({
+            "market": symbol,
+            "instrument_id": instrument_id,
+            "live_price": _fmt_price(live_price),
+            "analysis_candle_price": _fmt_price(analysis.get("price")),
+            "strategy": analysis.get("strategy"),
+            "technical_score": f"{analysis.get('technical_score', 0)}/6",
+        })
+
+        print("\nTECHNICAL CONDITIONS")
+        _table([
+            {"condition": key, "result": "PASS" if value else "FAIL"}
+            for key, value in (analysis.get("checks") or {}).items()
+        ])
+
+        pm_rows = analysis.get("polymarket") or {}
+        print("\nPOLYMARKET")
+        _table({
+            "available": pm_rows.get("available"),
+            "market": pm_rows.get("question"),
+            "duration_minutes": pm_rows.get("duration_minutes"),
+            "time_remaining_minutes": pm_rows.get("time_remaining_minutes"),
+            "up_probability": pm_rows.get("up_probability"),
+            "down_probability": pm_rows.get("down_probability"),
+            "probability_change_15m": pm_rows.get("probability_change_15m"),
+            "volume_usd": pm_rows.get("volume_usd"),
+            "bias": pm_rows.get("bias"),
+            "score": pm_rows.get("score"),
+            "confirms_buy": pm_rows.get("confirms_buy"),
+            "conflict": pm_rows.get("conflict"),
+        })
+        if not pm_rows.get("available") and pm.get("reason"):
+            print(f"note: {pm.get('reason')}")
+
+        print("\nSIGNAL")
+        _table({
+            "action": action,
+            "reason": analysis.get("reason"),
+            "price": _fmt_price(analysis.get("price")),
+            "breakout_high": _fmt_price(analysis.get("breakout_high")),
+            "adx_4h": analysis.get("adx_4h"),
+            "rsi_1h": analysis.get("rsi_1h"),
+            "volume_ratio": analysis.get("volume_ratio"),
+        })
+
+        print("\nTRADE / RISK")
+        _table({
+            "investment_usd": analysis.get("trade_amount_usd"),
+            "leverage": f"{analysis.get('max_leverage')}x",
+            "position_exposure_usd": analysis.get("position_exposure_usd", analysis.get("trade_amount_usd")),
+            "max_loss_usd": analysis.get("max_loss_usd"),
+            "strategy_stop": _fmt_price(analysis.get("strategy_stop")),
+            "cash_risk_stop": _fmt_price(analysis.get("cash_risk_stop")),
+            "stop": _fmt_price(analysis.get("stop")),
+            "estimated_loss_usd": analysis.get("estimated_loss_usd"),
+            "take_profit_1": _fmt_price(analysis.get("take_profit_1")),
+            "take_profit_2": _fmt_price(analysis.get("take_profit_2")),
+        })
+
+        print("\nRESULT")
+        print("BUY SIGNAL — NO ORDER PLACED" if action == "BUY" else "NO TRADE — NO ORDER PLACED")
+
+        if args.json:
+            print("\nRAW ANALYSIS")
+            _dump({
+                "symbol": symbol,
+                "instrument_id": instrument_id,
+                "live_price": live_price,
+                "analysis": analysis,
+            })
+        return 0
+
+    if strategy_name(symbol) != "GOLD_RANGE_SCALPER":
+        raise SystemExit(
+            f"signal is currently implemented for GOLD and BTC; {symbol} is not an active signal strategy."
+        )
 
     # Fetch enough history for EMA(50), ADX(14), the 24h/96-bar range,
     # rejection candles and breakout momentum.
