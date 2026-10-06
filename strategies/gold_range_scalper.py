@@ -92,6 +92,8 @@ class ScalperConfig:
     # --- leverage discipline ---
     leverage: int = 20
     max_leverage: int = 20
+    trade_amount_usd: float = 50.0
+    max_loss_usd: float = 25.0
 
     # --- macro guard ---
     macro_block: bool = False
@@ -313,17 +315,49 @@ def take_profit_levels(rng, side, cfg):
     }
 
 
-def _risk_block(entry, stop, cfg):
-    if not entry or stop is None:
-        return {}
-    risk_frac = abs(entry - stop) / entry
+def _cash_risk_stop(entry, side, cfg):
+    """Calculate a price stop from the configured cash-loss budget."""
+    if not entry or entry <= 0:
+        return None
     lev = min(cfg.leverage, cfg.max_leverage)
+    exposure = cfg.trade_amount_usd * lev
+    if exposure <= 0 or cfg.max_loss_usd <= 0:
+        return None
+    move_pct = min(0.99, cfg.max_loss_usd / exposure)
+    if side == "BUY":
+        return entry * (1.0 - move_pct)
+    return entry * (1.0 + move_pct)
+
+
+def _risk_block(entry, strategy_stop, side, cfg):
+    if not entry or strategy_stop is None:
+        return {}
+    lev = min(cfg.leverage, cfg.max_leverage)
+    exposure = cfg.trade_amount_usd * lev
+    risk_stop = _cash_risk_stop(entry, side, cfg)
+    if risk_stop is None:
+        return {}
+    # Keep the strategy's boundary stop when it is already tighter. Otherwise
+    # cap the effective stop at the user's cash-loss budget.
+    if side == "BUY":
+        effective_stop = max(strategy_stop, risk_stop)
+    else:
+        effective_stop = min(strategy_stop, risk_stop)
+    risk_frac = abs(entry - effective_stop) / entry
+    estimated_loss = exposure * risk_frac
     return {
         "leverage": lev,
+        "trade_amount_usd": cfg.trade_amount_usd,
+        "position_exposure_usd": exposure,
+        "max_loss_usd": cfg.max_loss_usd,
+        "strategy_stop": round(strategy_stop, 2),
+        "risk_stop": round(risk_stop, 2),
+        "stop": round(effective_stop, 2),
+        "estimated_loss_usd": round(estimated_loss, 2),
         "stop_distance_pct": round(risk_frac * 100.0, 3),
         "risk_pct_of_equity_at_leverage": round(risk_frac * lev * 100.0, 2),
         "leverage_capped": cfg.leverage > cfg.max_leverage,
-        "note": "Stop is mandatory. If the range breaks, the range assumption was wrong - do not average down.",
+        "note": "Effective stop is the tighter of the range-boundary stop and the cash-risk stop.",
     }
 
 
@@ -369,14 +403,14 @@ def make_signal(price, rng, regime, candles_15m, cfg):
         return dict(base, action="BUY", reason="all BUY conditions met",
                     entry=price, stop=round(stop, 2),
                     **take_profit_levels(rng, "BUY", cfg),
-                    **_risk_block(price, stop, cfg))
+                    **_risk_block(price, stop, "BUY", cfg))
 
     if all(sell_checks.values()):
         stop = high * (1.0 + cfg.stop_buffer_pct)
         return dict(base, action="SELL", reason="all SELL conditions met",
                     entry=price, stop=round(stop, 2),
                     **take_profit_levels(rng, "SELL", cfg),
-                    **_risk_block(price, stop, cfg))
+                    **_risk_block(price, stop, "SELL", cfg))
 
     if pos <= cfg.buy_zone_max_pct * 100.0:
         failed = [k for k, v in buy_checks.items() if not v]
