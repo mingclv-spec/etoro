@@ -88,7 +88,7 @@ def cmd_order(args: argparse.Namespace) -> int:
     _dump(client.open_market_order(
         args.symbol,
         args.amount,
-        transaction=args.transaction,
+        transaction=args.transaction.lower(),
         leverage=args.leverage,
         stop_loss=args.stop_loss,
         take_profit=args.take_profit,
@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("order", help="open a market order (gated by dry-run + limits)")
     p.add_argument("--symbol", required=True)
     p.add_argument("--amount", type=float, required=True, help="cash amount in USD")
-    p.add_argument("--transaction", choices=("buy", "sell"), default="buy")
+    p.add_argument("--transaction", "--side", dest="transaction", choices=("buy", "sell", "BUY", "SELL"), default="buy")
     p.add_argument("--leverage", type=int, default=1)
     p.add_argument("--stop-loss", type=float)
     p.add_argument("--take-profit", type=float)
