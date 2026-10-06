@@ -231,6 +231,51 @@ journal/
 
 Runtime journal/state files are excluded from Git.
 
+## Command-line account switching and demo orders
+
+The repository is designed to run from:
+
+```powershell
+cd C:\eToro-AutoTrader
+```
+
+You can switch the account for a single command without editing `.env`:
+
+```powershell
+py -m etoro.cli --account demo check
+py -m etoro.cli --account real check
+```
+
+The selected account always selects its matching credential:
+
+```text
+demo -> ETORO_USER_KEY_demo
+real -> ETORO_USER_KEY
+```
+
+The account override applies only to that process and never writes credentials.
+
+### Demo order
+
+For an actual **eToro Demo/Virtual account** order, explicitly enable broker execution for that process:
+
+```powershell
+cd C:\eToro-AutoTrader
+$env:ETORO_TRADING_MODE="live"
+$env:ETORO_DRY_RUN="false"
+py -m etoro.cli --account demo order --symbol XAUUSD --side BUY --amount 500 --leverage 20 --yes
+```
+
+`--side BUY` and `--side SELL` are aliases for the API's buy/sell direction.
+
+The command resolves the instrument ID, uses the Demo execution endpoint, and never uses `ETORO_USER_KEY` when `--account demo` is selected.
+
+For leveraged orders, add `--stop-loss` and optionally `--take-profit` when required by the instrument/account risk rules.
+
+### Important
+
+`ETORO_TRADING_MODE=live` in the command above means **broker execution is enabled**, not that the Real account is selected. The account is still explicitly `demo`, so the demo user key and demo endpoint are used.
+
 ## Execute a paper trade
 
 The execution engine is:
