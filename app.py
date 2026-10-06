@@ -9,6 +9,9 @@ from typing import Any, Dict, List, Optional
 
 from etoro import EtoroDryRunBlocked, EtoroError, __version__, build_client
 from etoro.config import ConfigError, load_settings
+from strategies.gold_range_scalper import ScalperConfig, analyze as analyze_gold
+from strategies.indicators import to_candles
+from strategies.strategy_router import strategy_name
 
 
 def _parse_params(pairs: Optional[List[str]]) -> Dict[str, str]:
@@ -142,6 +145,131 @@ def cmd_order(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_price(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _condition_rows(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    gates = analysis.get("gates") or {}
+    for key, value in gates.items():
+        rows.append({"condition": key, "result": "PASS" if value else "FAIL"})
+
+    signal = analysis.get("signal") or {}
+    for side, checks in (("BUY", signal.get("buy_conditions")), ("SELL", signal.get("sell_conditions"))):
+        if not isinstance(checks, dict):
+            continue
+        for key, value in checks.items():
+            rows.append({"condition": f"{side}: {key}", "result": "PASS" if value else "FAIL"})
+
+    breakout = analysis.get("breakout") or {}
+    for key, value in (breakout.get("checks") or {}).items():
+        rows.append({"condition": f"BREAKOUT: {key}", "result": "PASS" if value else "FAIL"})
+    return rows
+
+
+def cmd_signal(args: argparse.Namespace) -> int:
+    """Read live eToro candles and print a signal; never places an order."""
+    symbol = args.symbol.strip().upper()
+    if strategy_name(symbol) != "GOLD_RANGE_SCALPER":
+        raise SystemExit(
+            f"signal is currently implemented for GOLD only; {symbol} is not an active signal strategy."
+        )
+
+    client = build_client()
+    instrument_id = client.resolve_instrument_id(symbol)
+
+    rate_payload = client.get_rates(instrument_id)
+    live_price = client.extract_rate(rate_payload, instrument_id)
+
+    # Fetch enough history for EMA(50), ADX(14), the 24h/96-bar range,
+    # rejection candles and breakout momentum.
+    raw_1h = client.get_candles(instrument_id, "OneHour", 120, direction="asc")
+    raw_15m = client.get_candles(instrument_id, "FifteenMinutes", 120, direction="asc")
+    candles_1h = to_candles(client.extract_candles(raw_1h))
+    candles_15m = to_candles(client.extract_candles(raw_15m))
+
+    if len(candles_1h) < 60:
+        raise EtoroError(f"Not enough 1H candles returned for GOLD: {len(candles_1h)}")
+    if len(candles_15m) < 100:
+        raise EtoroError(f"Not enough 15m candles returned for GOLD: {len(candles_15m)}")
+
+    cfg = ScalperConfig(
+        leverage=20,
+        max_leverage=20,
+        trade_amount_usd=50.0,
+        max_loss_usd=25.0,
+    )
+    analysis = analyze_gold(candles_1h, candles_15m, cfg)
+    signal = analysis.get("signal") or {}
+    action = signal.get("action", "WAIT")
+
+    print("GOLD TRADING SIGNAL")
+    print("=" * 64)
+    _table({
+        "market": symbol,
+        "instrument_id": instrument_id,
+        "live_price": _fmt_price(live_price),
+        "analysis_candle_price": _fmt_price((analysis.get("regime") or {}).get("price")),
+        "strategy": analysis.get("strategy"),
+        "mode": analysis.get("mode"),
+        "candles_1h": len(candles_1h),
+        "candles_15m": len(candles_15m),
+    })
+
+    print("\nCONDITIONS")
+    _table(_condition_rows(analysis))
+
+    print("\nSIGNAL")
+    _table({
+        "action": action,
+        "reason": signal.get("reason"),
+        "zone_position_pct": signal.get("zone_position_pct"),
+        "rsi14": signal.get("rsi14"),
+        "range_low": _fmt_price(signal.get("range_low")),
+        "range_high": _fmt_price(signal.get("range_high")),
+    })
+
+    # Risk budget is configured independently of whether a trade is triggered.
+    exposure = cfg.trade_amount_usd * min(cfg.leverage, cfg.max_leverage)
+    risk_rows = {
+        "investment_usd": cfg.trade_amount_usd,
+        "leverage": f"{min(cfg.leverage, cfg.max_leverage)}x",
+        "position_exposure_usd": exposure,
+        "max_loss_usd": cfg.max_loss_usd,
+    }
+    for key in ("strategy_stop", "risk_stop", "stop", "estimated_loss_usd",
+                "stop_distance_pct", "tp1", "tp2"):
+        if key in signal:
+            risk_rows[key] = signal[key]
+
+    print("\nTRADE / RISK")
+    _table(risk_rows)
+
+    print("\nRESULT")
+    if action in {"BUY", "SELL"}:
+        print(f"{action} SIGNAL — NO ORDER PLACED")
+    elif action == "STAND_DOWN":
+        print("STAND DOWN — NO ORDER PLACED")
+    else:
+        print("NO TRADE — NO ORDER PLACED")
+
+    if args.json:
+        print("\nRAW ANALYSIS")
+        _dump({
+            "symbol": symbol,
+            "instrument_id": instrument_id,
+            "live_price": live_price,
+            "analysis": analysis,
+        })
+    return 0
+
+
 def cmd_close(args: argparse.Namespace) -> int:
     client = build_client()
     if not args.yes:
@@ -187,6 +315,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="confirm you really mean it")
     p.add_argument("--json", action="store_true", help="also dump the raw JSON response")
     p.set_defaults(func=cmd_order)
+
+    p = sub.add_parser("signal", help="analyze a live market signal without placing an order")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--json", action="store_true", help="also dump the raw signal analysis")
+    p.set_defaults(func=cmd_signal)
 
     p = sub.add_parser("close", help="close a position (gated by dry-run)")
     p.add_argument("--position-id", type=int, required=True)
