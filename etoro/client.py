@@ -290,6 +290,94 @@ class EtoroClient:
             return payload
         return self.get("/market-data/search", params={"search": wanted})
 
+    def get_rates(self, instrument_id: int) -> Any:
+        """Fetch the current live rate snapshot for one instrument."""
+        return self.get(
+            "/market-data/instruments/rates",
+            params={"instrumentIds": int(instrument_id)},
+        )
+
+    def get_candles(
+        self,
+        instrument_id: int,
+        interval: str,
+        candles_count: int,
+        *,
+        direction: str = "asc",
+    ) -> Any:
+        """Fetch historical OHLCV candles from eToro's market-data API."""
+        allowed = {
+            "OneMinute", "FiveMinutes", "TenMinutes", "FifteenMinutes",
+            "ThirtyMinutes", "OneHour", "FourHours", "OneDay", "OneWeek",
+        }
+        interval = str(interval).strip()
+        direction = str(direction).strip().lower()
+        count = int(candles_count)
+        if interval not in allowed:
+            raise EtoroError(f"Unsupported candle interval: {interval!r}")
+        if direction not in {"asc", "desc"}:
+            raise EtoroError("Candle direction must be asc or desc")
+        if count < 1 or count > 1000:
+            raise EtoroError("candles_count must be between 1 and 1000")
+        path = (
+            f"/market-data/instruments/{int(instrument_id)}/history/candles/"
+            f"{direction}/{interval}/{count}"
+        )
+        return self.get(path)
+
+    @staticmethod
+    def extract_candles(payload: Any) -> list[dict]:
+        """Unwrap eToro's nested candle response into individual candle rows."""
+        if isinstance(payload, Mapping) and isinstance(payload.get("data"), Mapping):
+            payload = payload["data"]
+        if isinstance(payload, Mapping):
+            groups = payload.get("candles")
+        else:
+            groups = payload
+        if not isinstance(groups, list):
+            return []
+        rows: list[dict] = []
+        for group in groups:
+            if isinstance(group, Mapping) and isinstance(group.get("candles"), list):
+                rows.extend(x for x in group["candles"] if isinstance(x, Mapping))
+            elif isinstance(group, Mapping) and "close" in group:
+                rows.append(dict(group))
+        return rows
+
+    @staticmethod
+    def extract_rate(payload: Any, instrument_id: int) -> Optional[float]:
+        """Extract the latest/last execution price from a rates response."""
+        if isinstance(payload, Mapping) and isinstance(payload.get("data"), Mapping):
+            payload = payload["data"]
+        candidates = []
+        if isinstance(payload, Mapping):
+            for key in ("rates", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    candidates.extend(value)
+            if not candidates and "candles" in payload and isinstance(payload["candles"], list):
+                candidates.extend(payload["candles"])
+        elif isinstance(payload, list):
+            candidates = payload
+
+        for item in candidates:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                iid = int(item.get("instrumentId", item.get("instrumentID", instrument_id)))
+            except (TypeError, ValueError):
+                iid = instrument_id
+            if iid != int(instrument_id):
+                continue
+            for key in ("lastExecution", "lastPrice", "last", "close", "mid", "bid"):
+                value = item.get(key)
+                if value is not None:
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        pass
+        raise EtoroError(f"No live rate found for instrumentId {instrument_id}")
+
     def resolve_instrument_id(self, symbol: str) -> int:
         """Resolve a symbol dynamically from eToro's current instrument catalog."""
         payload = self.search_instruments(symbol)
