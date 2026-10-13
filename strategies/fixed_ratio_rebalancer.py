@@ -73,7 +73,7 @@ def _metrics(equities: Sequence[float], dates: Sequence[str], initial_capital: f
         "cagr_pct": round(cagr * 100, 4),
         "annualized_volatility_pct": round(vol * 100, 4),
         "sharpe_ratio_rf0": round(sharpe, 4) if sharpe is not None else None,
-        "max_drawdown_pct": round(_max_drawdown(equities) * 100, 4),
+        "max_drawdown_pct": round(_max_drawdown([initial_capital, *equities]) * 100, 4),
     }
 
 
