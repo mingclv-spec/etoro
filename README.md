@@ -648,3 +648,25 @@ etoro/config.py
 - [ ] production live-execution validation
 
 **Real-money trading should remain disabled until the validation stage is complete.**
+
+
+## SPY / GLD fixed-ratio rebalancing research
+
+An isolated daily 50/50 SPY/GLD historical backtest is available. It does **not** use the eToro order API and does not alter the GOLD/BTC strategies or their risk controls.
+
+Optional historical data download:
+
+```powershell
+py -m pip install yfinance
+py rebalancing_backtest.py --download --period 10y --initial-capital 100000 --cost-bps 5
+```
+
+Or supply local CSVs containing `Date` and preferably `Adj Close` columns:
+
+```powershell
+py rebalancing_backtest.py --spy-csv data\spy.csv --gld-csv data\gld.csv
+```
+
+The report compares daily rebalancing with SPY buy-and-hold, GLD buy-and-hold, and static initial 50/50 buy-and-hold. It includes estimated transaction costs, turnover, CAGR, volatility, Sharpe ratio and maximum drawdown. Results are written to `journal\rebalancing_backtest\`, which is ignored by Git.
+
+See [docs/REBALANCING_BACKTEST.md](docs/REBALANCING_BACKTEST.md) for assumptions, execution timing, data requirements and tests. The default 5 bps cost is an illustrative assumption, not a verified eToro fee. This is research-only: no orders are placed.
